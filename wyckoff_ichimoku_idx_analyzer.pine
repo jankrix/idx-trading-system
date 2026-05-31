@@ -1,0 +1,249 @@
+//@version=6
+indicator("Wyckoff + Ichimoku IDX Analyzer", overlay=true, max_labels_count=300, max_boxes_count=100)
+
+// ─── INPUTS ─────────────────────────────────────────────────────────────────
+grp_vol = "Volume Settings"
+vol_len      = input.int(20,   "Volume MA Length",           group=grp_vol, minval=5)
+hi_vol_mult  = input.float(2.0,"High Volume Threshold (x)",  group=grp_vol, step=0.1)
+lo_vol_mult  = input.float(0.5,"Low Volume Threshold (x)",   group=grp_vol, step=0.1)
+
+grp_wyk = "Wyckoff Settings"
+consol_len   = input.int(15,   "Consolidation Lookback Bars",group=grp_wyk, minval=5)
+consol_pct   = input.float(8.0,"Max Consolidation Range %",  group=grp_wyk, step=0.5)
+
+grp_ichi = "Ichimoku Settings"
+tk_len  = input.int(9,  "Tenkan-sen Length", group=grp_ichi)
+kj_len  = input.int(26, "Kijun-sen Length",  group=grp_ichi)
+sb_len  = input.int(52, "Senkou B Length",   group=grp_ichi)
+disp    = input.int(26, "Cloud Displacement",group=grp_ichi)
+
+grp_vis = "Display"
+show_labels = input.bool(true, "Show Signal Labels",           group=grp_vis)
+show_dash   = input.bool(true, "Show Dashboard",               group=grp_vis)
+show_bg     = input.bool(true, "Highlight Consolidation Zone", group=grp_vis)
+show_ichi   = input.bool(true, "Show Ichimoku Lines",          group=grp_vis)
+
+// ─── VOLUME ──────────────────────────────────────────────────────────────────
+avg_vol   = ta.sma(volume, vol_len)
+rel_vol   = volume / avg_vol
+is_hi_vol = rel_vol >= hi_vol_mult
+is_lo_vol = rel_vol <= lo_vol_mult
+
+// ─── PRICE STRUCTURE ─────────────────────────────────────────────────────────
+bar_range   = high - low
+avg_range   = ta.sma(bar_range, vol_len)
+close_pos   = bar_range > 0 ? (close - low) / bar_range : 0.5
+is_bull     = close >= open
+is_bear     = close < open
+narrow_bar  = bar_range < avg_range * 0.65
+wide_bar    = bar_range > avg_range * 1.3
+
+sma20 = ta.sma(close, 20)
+
+// ─── CONSOLIDATION ZONE ──────────────────────────────────────────────────────
+zone_high    = ta.highest(high, consol_len)
+zone_low     = ta.lowest(low,  consol_len)
+zone_rng_pct = (zone_high - zone_low) / zone_low * 100
+in_consol    = zone_rng_pct <= consol_pct
+
+// ─── ICHIMOKU ────────────────────────────────────────────────────────────────
+tenkan   = (ta.highest(high, tk_len) + ta.lowest(low, tk_len)) / 2
+kijun    = (ta.highest(high, kj_len) + ta.lowest(low, kj_len)) / 2
+senkou_a = (tenkan + kijun) / 2
+senkou_b = (ta.highest(high, sb_len) + ta.lowest(low, sb_len)) / 2
+
+cloud_top    = math.max(senkou_a[disp], senkou_b[disp])
+cloud_bottom = math.min(senkou_a[disp], senkou_b[disp])
+
+above_cloud = close > cloud_top
+below_cloud = close < cloud_bottom
+in_cloud    = not above_cloud and not below_cloud
+
+tk_bull       = tenkan > kijun
+tk_cross_up   = ta.crossover(tenkan,  kijun)
+
+chikou_bull = close > high[disp]
+chikou_bear = close < low[disp]
+
+// ─── FCA / SPECIAL MONITORING DETECTION ─────────────────────────────────────
+// Stocks on Papan Pemantauan Khusus (special monitoring / FCA board) trade once
+// per day at a single auction price — their bars have high==low or are single-price.
+// All Wyckoff signals are suppressed on these bars to prevent false readings.
+is_fca = (high == low) or (open == high and high == low and low == close)
+
+// ─── POST-HOLIDAY GAP DETECTION ──────────────────────────────────────────────
+// First session after a 2+ day gap: avg_vol includes pre-holiday lull so rel_vol
+// reads artificially high. Suppress hi_vol-dependent signals on these bars.
+post_gap     = (time - time[1]) > 3 * 86400000
+is_hi_vol_ok = is_hi_vol and not post_gap
+
+// ─── WYCKOFF SIGNALS ─────────────────────────────────────────────────────────
+
+// Selling Climax (SC): big bearish bar + huge volume + close recovers off low
+// Requires below-cloud context — avoids false SC on mid-uptrend shakeouts
+sc = is_bear and is_hi_vol_ok and wide_bar and close_pos > 0.50 and (below_cloud or close < sma20) and not is_fca
+
+// Automatic Rally (AR): bounce bar after SC
+ar = is_bull and sc[1] and rel_vol > 1.1
+
+// Secondary Test (ST): low-vol retest of SC area
+sc_low_val = ta.valuewhen(sc, low, 0)
+st         = math.abs(low - sc_low_val) / sc_low_val < 0.04 and is_lo_vol and is_bull and not sc
+
+// Spring: dips below support then snaps back above
+// Threshold lowered 0.7→0.4 to capture the best low-vol springs (cleanest Wyckoff setup)
+prev_low = ta.lowest(low, consol_len)[1]
+spring   = low < prev_low and close > prev_low and is_bull and rel_vol > 0.4 and not is_fca
+
+// Sign of Strength (SoS): breakout above resistance on high volume
+prev_high = ta.highest(high, consol_len)[1]
+sos       = close > prev_high and is_hi_vol_ok and is_bull and wide_bar and not is_fca
+
+// No Supply (NS): narrow bar + low volume — sellers exhausted
+// Changed close > sma20 → close > zone midpoint to catch in-base NS (early quiet entry)
+zone_mid  = (zone_high + zone_low) / 2
+no_supply = narrow_bar and is_lo_vol and close > zone_mid and not is_bear and not is_fca
+
+// Effort vs Result (EVR): high volume + narrow range = absorption
+evr = is_hi_vol_ok and narrow_bar and not is_fca
+
+// Upthrust (UT): false breakout above resistance on high vol then closes back under
+upthrust = high > prev_high and close < prev_high and is_hi_vol_ok and is_bear and not is_fca
+
+// ─── COMPOSITE VERDICT ───────────────────────────────────────────────────────
+// Springs allowed below cloud (Wyckoff Springs happen at/below support by definition)
+// SoS and NS require full above-cloud confirmation
+buy_signal     = (above_cloud and tk_bull and (sos or no_supply) and chikou_bull) or
+                 (spring and tk_bull and not is_fca)
+watch_signal   = in_consol and (sc or evr or st) and not above_cloud
+caution_signal = upthrust or (below_cloud and is_hi_vol_ok and is_bear)
+
+// ─── EXIT SIGNAL ─────────────────────────────────────────────────────────────
+// Triggers when: Tenkan crosses below Kijun (momentum lost), OR Upthrust appears,
+// OR high-volume bear bar with weak close (distribution into your position)
+exit_signal = ta.crossunder(tenkan, kijun) or upthrust or (is_hi_vol_ok and is_bear and close_pos < 0.3)
+
+// ─── ICHIMOKU LINES ──────────────────────────────────────────────────────────
+p_tk  = plot(show_ichi ? tenkan   : na, "Tenkan-sen",  color=color.new(#E84393, 20), linewidth=1)
+p_kj  = plot(show_ichi ? kijun    : na, "Kijun-sen",   color=color.new(#007BB6, 20), linewidth=2)
+p_ck  = plot(show_ichi ? close    : na, "Chikou Span", color=color.new(#6A0DAD, 40), linewidth=1, offset=-disp)
+p_sa  = plot(show_ichi ? senkou_a : na, "Senkou A",    color=color.new(#26A69A, 10), linewidth=1, offset=disp)
+p_sb  = plot(show_ichi ? senkou_b : na, "Senkou B",    color=color.new(#EF5350, 10), linewidth=1, offset=disp)
+fill(p_sa, p_sb,
+     color = senkou_a >= senkou_b
+              ? color.new(#26A69A, 85)
+              : color.new(#EF5350, 85),
+     title="Cloud")
+
+// ─── BACKGROUND ──────────────────────────────────────────────────────────────
+bgcolor(show_bg and in_consol ? color.new(color.yellow, 88) : na, title="Consolidation Zone")
+
+// ─── BAR COLORING ────────────────────────────────────────────────────────────
+barcolor(is_hi_vol and is_bull ? color.new(color.lime, 20) : na, title="High Vol Bull")
+barcolor(is_hi_vol and is_bear ? color.new(color.red,  20) : na, title="High Vol Bear")
+barcolor(is_lo_vol              ? color.new(color.gray, 40) : na, title="Low Vol Bar")
+
+// ─── LABELS ──────────────────────────────────────────────────────────────────
+if show_labels
+    if sc
+        label.new(bar_index, low, "SC", yloc=yloc.belowbar, style=label.style_label_up,
+             color=color.new(color.red, 10), textcolor=color.white, size=size.small)
+    if spring
+        label.new(bar_index, low, "Spring ↑", yloc=yloc.belowbar, style=label.style_label_up,
+             color=color.new(color.orange, 10), textcolor=color.white, size=size.small)
+    if sos
+        label.new(bar_index, high, "SoS ↑", yloc=yloc.abovebar, style=label.style_label_down,
+             color=color.new(color.green, 10), textcolor=color.white, size=size.small)
+    if no_supply
+        label.new(bar_index, low, "NS", yloc=yloc.belowbar, style=label.style_label_up,
+             color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
+    if evr
+        label.new(bar_index, high, "EVR", yloc=yloc.abovebar, style=label.style_label_down,
+             color=color.new(color.purple, 20), textcolor=color.white, size=size.tiny)
+    if upthrust
+        label.new(bar_index, high, "UT ⚠", yloc=yloc.abovebar, style=label.style_label_down,
+             color=color.new(color.red, 10), textcolor=color.white, size=size.small)
+    if tk_cross_up
+        label.new(bar_index, low, "TK↑", yloc=yloc.belowbar, style=label.style_label_up,
+             color=color.new(color.blue, 20), textcolor=color.white, size=size.tiny)
+    if exit_signal
+        label.new(bar_index, high, "EXIT ⚠", yloc=yloc.abovebar, style=label.style_label_down,
+             color=color.new(color.fuchsia, 10), textcolor=color.white, size=size.small)
+    if is_fca
+        label.new(bar_index, high, "FCA", yloc=yloc.abovebar, style=label.style_label_down,
+             color=color.new(color.gray, 30), textcolor=color.white, size=size.tiny)
+    if post_gap
+        label.new(bar_index, low, "GAP", yloc=yloc.belowbar, style=label.style_label_up,
+             color=color.new(color.orange, 30), textcolor=color.white, size=size.tiny)
+
+// ─── DASHBOARD ───────────────────────────────────────────────────────────────
+if show_dash and barstate.islast
+    var table dash = table.new(position.top_right, 2, 11,
+         bgcolor=color.new(color.black, 30), border_width=1, border_color=color.new(color.gray, 50))
+
+    table.cell(dash, 0, 0, "WYCKOFF + ICHIMOKU", text_color=color.white,
+         bgcolor=color.new(color.navy, 10), text_size=size.small)
+    table.cell(dash, 1, 0, "IDX SWING ANALYZER", text_color=color.silver,
+         bgcolor=color.new(color.navy, 10), text_size=size.small)
+
+    rv_col = is_hi_vol ? color.lime : is_lo_vol ? color.red : color.silver
+    table.cell(dash, 0, 1, "Rel. Volume", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(math.round(rel_vol, 2)) + "x avg", text_color=rv_col, text_size=size.small)
+
+    ichi_txt = above_cloud ? "Above Cloud ✓" : below_cloud ? "Below Cloud ✗" : "Inside Cloud ○"
+    ichi_col = above_cloud ? color.lime : below_cloud ? color.red : color.orange
+    table.cell(dash, 0, 2, "Ichimoku Cloud", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, ichi_txt, text_color=ichi_col, text_size=size.small)
+
+    tk_txt = tk_bull ? "Tenkan > Kijun ✓" : "Tenkan < Kijun ✗"
+    tk_col = tk_bull ? color.lime : color.red
+    table.cell(dash, 0, 3, "TK Position", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, tk_txt, text_color=tk_col, text_size=size.small)
+
+    ck_txt = chikou_bull ? "Bullish ✓" : chikou_bear ? "Bearish ✗" : "Neutral ○"
+    ck_col = chikou_bull ? color.lime : chikou_bear ? color.red : color.orange
+    table.cell(dash, 0, 4, "Chikou Span", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 4, ck_txt, text_color=ck_col, text_size=size.small)
+
+    consol_txt = in_consol ? "YES (" + str.tostring(math.round(zone_rng_pct, 1)) + "%)" : "NO"
+    consol_col = in_consol ? color.yellow : color.silver
+    table.cell(dash, 0, 5, "Accumulation Base", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 5, consol_txt, text_color=consol_col, text_size=size.small)
+
+    last_sig = upthrust ? "Upthrust ⚠" : sos ? "Sign of Strength" : spring ? "Spring" :
+         no_supply ? "No Supply" : sc ? "Selling Climax" : evr ? "Absorption (EVR)" :
+         st ? "Secondary Test" : ar ? "Auto Rally" : "—"
+    last_col = upthrust ? color.red : (sos or spring or no_supply or st) ? color.lime :
+         (sc or evr or ar) ? color.yellow : color.silver
+    table.cell(dash, 0, 6, "Wyckoff Signal", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 6, last_sig, text_color=last_col, text_size=size.small)
+
+    phase_txt = sos and above_cloud ? "Markup / Trending Up" :
+         in_consol and (sc or evr) ? "Accumulation / Basing" :
+         above_cloud and no_supply ? "Markup / Pullback Entry" :
+         upthrust ? "Distribution / Caution" :
+         below_cloud ? "Markdown / Avoid" : "Transitioning"
+    phase_col = str.contains(phase_txt, "Markup") ? color.lime :
+         str.contains(phase_txt, "Accum") ? color.yellow :
+         str.contains(phase_txt, "Dist") or str.contains(phase_txt, "Avoid") ? color.red : color.orange
+    table.cell(dash, 0, 7, "Wyckoff Phase", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 7, phase_txt, text_color=phase_col, text_size=size.small)
+
+    rr_txt = buy_signal ? "Stop below " + str.tostring(zone_low) + " IDR" : "—"
+    table.cell(dash, 0, 8, "Stop Loss Guide", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 8, rr_txt, text_color=color.silver, text_size=size.small)
+
+    exit_txt = exit_signal ? "  EXIT SIGNAL  " : is_fca ? "  FCA BAR — SKIP  " : post_gap ? "  POST-GAP — VOL UNRELIABLE  " : "  —  "
+    exit_bg  = exit_signal ? color.new(color.fuchsia, 30) : is_fca ? color.new(color.gray, 40) : post_gap ? color.new(color.orange, 40) : color.new(color.gray, 70)
+    exit_col = exit_signal ? color.fuchsia : is_fca ? color.silver : post_gap ? color.orange : color.silver
+    table.cell(dash, 0, 9, "Exit / Warning", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 9, exit_txt, text_color=exit_col, bgcolor=exit_bg, text_size=size.small)
+
+    verdict_txt = buy_signal ? "  BUY SIGNAL  " : watch_signal ? "  WATCH / WAIT  " :
+         caution_signal ? "  CAUTION / AVOID  " : "  NEUTRAL  "
+    verdict_bg  = buy_signal ? color.new(color.green, 30) : watch_signal ? color.new(color.yellow, 40) :
+         caution_signal ? color.new(color.red, 40) : color.new(color.gray, 50)
+    verdict_col = buy_signal ? color.lime : watch_signal ? color.yellow :
+         caution_signal ? color.red : color.silver
+    table.cell(dash, 0, 10, "VERDICT", text_color=color.white, bgcolor=verdict_bg, text_size=size.normal)
+    table.cell(dash, 1, 10, verdict_txt, text_color=verdict_col, bgcolor=verdict_bg, text_size=size.normal)

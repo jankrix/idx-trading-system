@@ -1,0 +1,10 @@
+# Personal trading data — never commit
+trading_journal.md
+investment_portfolio_journal.md
+us_portfolio_journal.md
+
+# Claude memory (machine-specific)
+.claude/
+
+# OS
+.DS_Store

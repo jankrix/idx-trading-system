@@ -1,0 +1,108 @@
+//@version=6
+indicator("Volume Distribution Analyzer", overlay=false, max_labels_count=200)
+
+grp_vol = "Volume Settings"
+vol_ma_len  = input.int(20,  "Volume MA Length",           group=grp_vol, minval=5)
+hi_vol_mult = input.float(2.0,"High Vol Threshold (x avg)", group=grp_vol, step=0.1)
+lo_vol_mult = input.float(0.5,"Low Vol Threshold (x avg)",  group=grp_vol, step=0.1)
+climax_mult = input.float(3.0,"Climax Threshold (x avg)",   group=grp_vol, step=0.1)
+
+grp_vsa = "VSA Labels"
+show_vsa = input.bool(true, "Show VSA Annotations", group=grp_vsa)
+
+avg_vol    = ta.sma(volume, vol_ma_len)
+rel_vol    = volume / avg_vol
+is_hi_vol  = rel_vol >= hi_vol_mult
+is_lo_vol  = rel_vol <= lo_vol_mult
+is_climax  = rel_vol >= climax_mult
+is_bull    = close >= open
+is_bear    = close < open
+
+bar_range  = high - low
+avg_range  = ta.sma(bar_range, vol_ma_len)
+narrow_bar = bar_range < avg_range * 0.65
+wide_bar   = bar_range > avg_range * 1.3
+close_pos  = bar_range > 0 ? (close - low) / bar_range : 0.5
+
+obv    = ta.obv
+obv_ma = ta.sma(obv, vol_ma_len)
+
+// VSA Signals
+// Buying Climax: huge vol, wide bull bar, closes mid = smart money distributing
+buying_climax  = is_climax and is_bull and wide_bar and close_pos < 0.5
+// Selling Climax: huge vol, wide bear bar, close recovers = smart money absorbing
+selling_climax = is_climax and is_bear and wide_bar and close_pos > 0.3
+// No Supply: low vol + narrow + bullish = sellers exhausted
+no_supply      = is_lo_vol and narrow_bar and is_bull
+// No Demand: low vol + narrow + bearish = buyers absent
+no_demand      = is_lo_vol and narrow_bar and is_bear
+// Absorption: high vol + narrow range = smart money soaking up supply
+absorption     = is_hi_vol and narrow_bar
+// Stopping Volume: high vol, wide bear bar, closes near top = demand entering
+stopping_vol   = is_hi_vol and wide_bar and close_pos > 0.65 and is_bear
+
+// Bar color: single line to avoid continuation errors
+vol_color = is_climax and is_bull ? color.rgb(0,255,0) : is_climax and is_bear ? color.rgb(255,0,0) : is_hi_vol and is_bull ? color.new(#26A69A,20) : is_hi_vol and is_bear ? color.new(#EF5350,20) : is_lo_vol ? color.new(#9E9E9E,50) : is_bull ? color.new(#26A69A,65) : color.new(#EF5350,65)
+
+plot(volume,                "Volume",       style=plot.style_columns, color=vol_color)
+plot(avg_vol,               "Vol MA",       color=color.new(color.yellow, 20), linewidth=1)
+plot(avg_vol * hi_vol_mult, "Hi Threshold", color=color.new(color.red,    50), linewidth=1)
+plot(avg_vol * climax_mult, "Climax Line",  color=color.new(#FF6B00,      30), linewidth=1)
+
+if show_vsa
+    if buying_climax
+        label.new(bar_index, volume, "VSA: BC", style=label.style_label_down,
+             color=color.new(#FF6B00, 10), textcolor=color.white, size=size.small)
+    if selling_climax
+        label.new(bar_index, volume, "VSA: SC", style=label.style_label_down,
+             color=color.new(color.green, 10), textcolor=color.white, size=size.small)
+    if no_supply
+        label.new(bar_index, volume, "VSA: NS", style=label.style_label_down,
+             color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
+    if no_demand
+        label.new(bar_index, volume, "VSA: ND", style=label.style_label_down,
+             color=color.new(color.orange, 20), textcolor=color.white, size=size.tiny)
+    if absorption
+        label.new(bar_index, volume, "VSA: ABS", style=label.style_label_down,
+             color=color.new(color.purple, 20), textcolor=color.white, size=size.tiny)
+    if stopping_vol
+        label.new(bar_index, volume, "VSA: SV", style=label.style_label_down,
+             color=color.new(color.blue, 20), textcolor=color.white, size=size.small)
+
+if barstate.islast
+    var table dash = table.new(position.top_right, 2, 7,
+         bgcolor=color.new(color.black, 30), border_width=1, border_color=color.new(color.gray, 60))
+
+    table.cell(dash, 0, 0, "VOLUME DISTRIBUTION", text_color=color.white,
+         bgcolor=color.new(color.navy, 10), text_size=size.small)
+    table.cell(dash, 1, 0, "VSA ANALYZER", text_color=color.silver,
+         bgcolor=color.new(color.navy, 10), text_size=size.small)
+
+    rv_col = is_climax ? #FF6B00 : is_hi_vol ? color.lime : is_lo_vol ? color.orange : color.silver
+    table.cell(dash, 0, 1, "Rel. Volume", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(math.round(rel_vol, 2)) + "x", text_color=rv_col, text_size=size.small)
+
+    vsa_txt = buying_climax ? "Buying Climax" : selling_climax ? "Selling Climax" : stopping_vol ? "Stopping Volume" : absorption ? "Absorption (EVR)" : no_supply ? "No Supply Bull" : no_demand ? "No Demand Bear" : "Normal"
+    vsa_col = buying_climax ? #FF6B00 : selling_climax ? color.lime : stopping_vol ? color.lime : absorption ? color.purple : no_supply ? color.teal : no_demand ? color.red : color.silver
+    table.cell(dash, 0, 2, "VSA Signal", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, vsa_txt,      text_color=vsa_col,     text_size=size.small)
+
+    obv_txt = obv > obv_ma and obv > obv[1] ? "Rising" : obv < obv_ma ? "Declining" : "Flat"
+    obv_col = obv > obv_ma and obv > obv[1] ? color.lime : obv < obv_ma ? color.red : color.orange
+    table.cell(dash, 0, 3, "OBV Trend", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, obv_txt,     text_color=obv_col,     text_size=size.small)
+
+    effort_txt = is_hi_vol and wide_bar ? "Genuine Move" : is_hi_vol and narrow_bar ? "Absorption" : is_lo_vol and wide_bar ? "Weak Move" : "Normal"
+    effort_col = is_hi_vol and wide_bar ? color.lime : is_hi_vol and narrow_bar ? color.purple : is_lo_vol and wide_bar ? color.orange : color.silver
+    table.cell(dash, 0, 4, "Effort vs Result", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 4, effort_txt,         text_color=effort_col, text_size=size.small)
+
+    cp_txt = close_pos > 0.7 ? "Strong Close" : close_pos < 0.3 ? "Weak Close" : "Mid Close"
+    cp_col = close_pos > 0.7 ? color.lime : close_pos < 0.3 ? color.red : color.orange
+    table.cell(dash, 0, 5, "Close Position", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 5, cp_txt,           text_color=cp_col,     text_size=size.small)
+
+    vol_trend     = avg_vol > avg_vol[5] ? "Expanding" : avg_vol < avg_vol[5] ? "Contracting" : "Stable"
+    vol_trend_col = avg_vol > avg_vol[5] ? color.lime : avg_vol < avg_vol[5] ? color.orange : color.silver
+    table.cell(dash, 0, 6, "Volume Trend", text_color=color.white,   text_size=size.small)
+    table.cell(dash, 1, 6, vol_trend,      text_color=vol_trend_col, text_size=size.small)

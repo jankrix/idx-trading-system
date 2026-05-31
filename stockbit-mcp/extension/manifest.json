@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Stockbit Token Sync",
+  "version": "1.0",
+  "description": "Captures Stockbit Bearer token and syncs it to the local MCP server config.",
+  "permissions": [
+    "webRequest",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://*.stockbit.com/*",
+    "http://localhost:3002/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  }
+}
