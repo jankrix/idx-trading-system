@@ -88,10 +88,10 @@ Different tiers are used for IDX vs US stocks:
 
 ## Step 1 — Clone / Copy the Project
 
-The project lives in two folders:
+The project lives in two folders (place them wherever you like — just keep them siblings):
 
 ```
-~/Documents/Erick-claude-workspace/brainstorm-digi-product/
+<your-project-path>/
 ├── TV-Stock-Analysis/        ← Pine scripts, journals, workflow guides (this folder)
 └── stockbit-mcp/             ← Stockbit MCP server + Chrome extension
 ```
@@ -100,6 +100,8 @@ Also needed separately:
 ```
 ~/tradingview-mcp/            ← TradingView MCP server (separate repo)
 ```
+
+Update all absolute paths in `~/.claude.json` and the launchd plist to match your chosen location.
 
 ---
 
@@ -126,18 +128,398 @@ node src/server.js --help
 
 ## Step 3 — Stockbit MCP
 
+The Stockbit MCP is a custom Node.js server that connects to Stockbit's private API using your Bearer token. The source is included in the `stockbit-mcp/` folder of this repo. If you're setting up from scratch, create each file below.
+
+### 3a — Folder structure
+
+```
+stockbit-mcp/
+├── index.js            ← MCP server (4 tools)
+├── token-server.js     ← HTTP server that receives token from Chrome extension
+├── package.json        ← dependencies
+├── config.json         ← Bearer token (never commit — listed in .gitignore)
+├── config.example.json ← empty template to commit
+└── extension/          ← Chrome extension (4 files)
+    ├── manifest.json
+    ├── background.js
+    ├── popup.html
+    └── popup.js
+```
+
+### 3b — package.json
+
+```json
+{
+  "name": "stockbit-mcp",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "commonjs",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "node-fetch": "^3.3.2"
+  }
+}
+```
+
+### 3c — config.json (create manually, never commit)
+
+```json
+{ "bearer_token": "" }
+```
+
+Also create `config.example.json` with the same empty template — this one is safe to commit.
+
+Add to `.gitignore`:
+```
+stockbit-mcp/config.json
+stockbit-mcp/node_modules/
+```
+
+### 3d — index.js (MCP server)
+
+This file registers 4 MCP tools and handles all Stockbit API calls. Full source:
+
+```js
+#!/usr/bin/env node
+
+const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
+const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
+const { CallToolRequestSchema, ListToolsRequestSchema } = require("@modelcontextprotocol/sdk/types.js");
+const https = require("https");
+const fs = require("fs");
+const path = require("path");
+
+const CONFIG_PATH = path.join(__dirname, "config.json");
+const BASE_HOST = "exodus.stockbit.com";
+const LARGE_LOT = 100;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const jitter = () => 400 + Math.floor(Math.random() * 300);
+
+function loadToken() {
+  return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")).bearer_token;
+}
+
+function httpsGet(url) {
+  return new Promise((resolve, reject) => {
+    const token = loadToken();
+    const req = https.get(url, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json", "User-Agent": "Mozilla/5.0" },
+    }, (res) => {
+      if (res.statusCode === 401) { reject(new Error("401_UNAUTHORIZED")); return; }
+      let data = "";
+      res.on("data", chunk => data += chunk);
+      res.on("end", () => { try { resolve(JSON.parse(data)); } catch (e) { reject(new Error("Failed to parse JSON")); } });
+    });
+    req.on("error", reject);
+  });
+}
+
+async function fetchBrokerDistribution(symbol, tradeDate, period = "TB_PERIOD_LAST_1_DAY") {
+  const params = new URLSearchParams({ date: tradeDate || "", symbol: symbol.toUpperCase(),
+    investor_type: "INVESTOR_TYPE_ALL", market_board: "MARKET_TYPE_REGULER",
+    data_type: "BROKER_DISTRIBUTION_DATA_TYPE_VALUE", period });
+  return httpsGet(`https://${BASE_HOST}/order-trade/broker/distribution?${params}`);
+}
+
+async function fetchRunningTrade(symbol, tradeDate, sort = "DESC", limit = 100) {
+  const params = new URLSearchParams({ "symbols[]": symbol.toUpperCase(), sort, limit: Math.min(limit, 100),
+    order_by: "RUNNING_TRADE_ORDER_BY_TIME" });
+  if (tradeDate) params.append("date", tradeDate);
+  const data = await httpsGet(`https://${BASE_HOST}/order-trade/running-trade?${params}`);
+  return (data?.data?.running_trade ?? []).filter(t => t.market_board === "RG");
+}
+
+async function fetchOpenAndClose(symbol, tradeDate) {
+  const open = await fetchRunningTrade(symbol, tradeDate, "ASC", 100);
+  await sleep(jitter());
+  const close = await fetchRunningTrade(symbol, tradeDate, "DESC", 100);
+  return { open, close };
+}
+
+function parseLot(str) { return parseFloat(str.replace(/,/g, "")); }
+function brokerTypeShort(bt) {
+  if (bt === "BROKER_TYPE_FOREIGN") return "F";
+  if (bt === "BROKER_TYPE_GOVERNMENT") return "G";
+  return "D";
+}
+
+function computeMetrics(trades) {
+  let buyLots = 0, sellLots = 0;
+  let fBuy = 0, fSell = 0, largeBuy = 0, largeSell = 0;
+  const brokerNet = {};
+  for (const t of trades) {
+    const lots = parseLot(t.lot), isBuy = t.action === "buy";
+    const buyerType = brokerTypeShort(t.buyer_type ?? ""), sellerType = brokerTypeShort(t.seller_type ?? "");
+    const buyer = t.buyer ?? "?", seller = t.seller ?? "?";
+    if (isBuy) {
+      buyLots += lots;
+      if (buyerType === "F") fBuy += lots;
+      if (lots >= LARGE_LOT) largeBuy += lots;
+      brokerNet[buyer] = (brokerNet[buyer] ?? 0) + lots;
+    } else {
+      sellLots += lots;
+      if (sellerType === "F") fSell += lots;
+      if (lots >= LARGE_LOT) largeSell += lots;
+      brokerNet[seller] = (brokerNet[seller] ?? 0) - lots;
+    }
+  }
+  const total = buyLots + sellLots, delta = buyLots - sellLots;
+  const sorted = Object.entries(brokerNet).sort((a, b) => b[1] - a[1]);
+  return {
+    total_lots: Math.round(total), buy_lots: Math.round(buyLots), sell_lots: Math.round(sellLots),
+    delta: Math.round(delta), delta_pct: Math.round(delta / (total || 1) * 1000) / 10,
+    foreign_buy: Math.round(fBuy), foreign_sell: Math.round(fSell), foreign_delta: Math.round(fBuy - fSell),
+    large_lot_buy: Math.round(largeBuy), large_lot_sell: Math.round(largeSell),
+    top_buyers:  sorted.filter(([,v]) => v > 0).slice(0,3).map(([b,v]) => ({ broker: b, net_lots: Math.round(v) })),
+    top_sellers: sorted.filter(([,v]) => v < 0).slice(0,3).map(([b,v]) => ({ broker: b, net_lots: Math.round(Math.abs(v)) })),
+  };
+}
+
+function computeDeltaSummary(openClose, symbol, tradeDate) {
+  const { open, close } = openClose;
+  const o = computeMetrics(open), c = computeMetrics(close), combined = computeMetrics([...open, ...close]);
+  let verdict;
+  if (c.delta_pct > 20 && c.foreign_delta > 0)       verdict = "STRONG ACCUMULATION — foreign buying + close delta positive";
+  else if (c.delta_pct > 10)                          verdict = "ACCUMULATION — net buying at close";
+  else if (c.delta_pct < -20 && c.foreign_delta < 0)  verdict = "STRONG DISTRIBUTION — foreign selling + close delta negative";
+  else if (c.delta_pct < -10)                         verdict = "DISTRIBUTION — net selling at close";
+  else if (Math.abs(c.delta_pct) <= 10 && c.large_lot_buy > c.large_lot_sell)
+                                                       verdict = "ABSORPTION — balanced delta but large lots buying";
+  else                                                 verdict = "NEUTRAL — no clear directional flow at close";
+  return { symbol: symbol.toUpperCase(), date: tradeDate, verdict,
+    open_session:  { time_range: `${open.at(-1)?.time ?? "?"} — ${open[0]?.time ?? "?"}`,  trades_sampled: open.length,  ...o },
+    close_session: { time_range: `${close.at(-1)?.time ?? "?"} — ${close[0]?.time ?? "?"}`, trades_sampled: close.length, ...c },
+    combined_200: combined };
+}
+
+function computeBrokerDistributionSummary(data, symbol, period) {
+  const byValue = data?.data?.by_value ?? {};
+  const buyers = byValue.top_broker_buy ?? [], sellers = byValue.top_broker_sell ?? [];
+  const date = data?.data?.date_info ?? data?.data?.start_date ?? "?";
+  const net = {};
+  for (const b of buyers) {
+    const code = b.detail.code;
+    if (!net[code]) net[code] = { buy: 0, sell: 0, type: b.detail.type };
+    net[code].buy += b.detail.amount;
+  }
+  for (const s of sellers) {
+    const code = s.detail.code;
+    if (!net[code]) net[code] = { buy: 0, sell: 0, type: s.detail.type };
+    net[code].sell += s.detail.amount;
+  }
+  const brokerList = Object.entries(net).map(([code, v]) => ({
+    broker: code, type: v.type, net_idr: v.buy - v.sell,
+  })).sort((a, b) => b.net_idr - a.net_idr);
+  const foreignNet = brokerList.filter(b => b.type === "Asing").reduce((s,b) => s + b.net_idr, 0);
+  const localNet   = brokerList.filter(b => b.type === "Lokal").reduce((s,b) => s + b.net_idr, 0);
+  const fmt = (n) => {
+    const abs = Math.abs(n);
+    if (abs >= 1e9) return (n/1e9).toFixed(2)+"B";
+    if (abs >= 1e6) return (n/1e6).toFixed(1)+"M";
+    return n.toLocaleString();
+  };
+  let verdict;
+  if (foreignNet > 1e9)       verdict = "STRONG ACCUMULATION — foreign net buyers (>1B IDR)";
+  else if (foreignNet > 0)    verdict = "ACCUMULATION — foreign net buyers";
+  else if (foreignNet < -1e9) verdict = "STRONG DISTRIBUTION — foreign net sellers (>1B IDR)";
+  else if (foreignNet < 0)    verdict = "DISTRIBUTION — foreign net sellers";
+  else if (localNet > 0)      verdict = "LOCAL ACCUMULATION — domestic net buyers, foreign neutral";
+  else                        verdict = "NEUTRAL — no clear directional foreign flow";
+  return { symbol: symbol.toUpperCase(), date, period, verdict,
+    foreign_net_idr: fmt(foreignNet), local_net_idr: fmt(localNet),
+    dominant_broker: brokerList[0] ? { broker: brokerList[0].broker, type: brokerList[0].type, net: fmt(brokerList[0].net_idr) } : null,
+    top_accumulators: brokerList.filter(b => b.net_idr > 0).slice(0,5).map(b => ({ broker: b.broker, type: b.type, net: fmt(b.net_idr) })),
+    top_distributors: brokerList.filter(b => b.net_idr < 0).slice(-5).reverse().map(b => ({ broker: b.broker, type: b.type, net: fmt(b.net_idr) })),
+  };
+}
+
+function computeBrokerFlow(trades, topN = 10) {
+  const brokers = {};
+  for (const t of trades) {
+    const lots = parseLot(t.lot), isBuy = t.action === "buy";
+    const code = isBuy ? t.buyer : t.seller;
+    const btype = brokerTypeShort(isBuy ? (t.buyer_type ?? "") : (t.seller_type ?? ""));
+    if (!brokers[code]) brokers[code] = { broker: code, type: btype, buy: 0, sell: 0 };
+    if (isBuy) brokers[code].buy += lots; else brokers[code].sell += lots;
+  }
+  return Object.values(brokers)
+    .map(b => ({ broker: b.broker, type: b.type, buy_lots: Math.round(b.buy), sell_lots: Math.round(b.sell),
+      net_lots: Math.round(b.buy - b.sell),
+      stance: (b.buy - b.sell) > 20 ? "ACCUMULATING" : (b.buy - b.sell) < -20 ? "DISTRIBUTING" : "NEUTRAL" }))
+    .sort((a, b) => b.net_lots - a.net_lots).slice(0, topN);
+}
+
+const server = new Server(
+  { name: "stockbit-running-trade", version: "1.0.0" },
+  { capabilities: { tools: {} } }
+);
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    { name: "stockbit_broker_distribution",
+      description: "Full-day broker accumulation/distribution for an IDX stock. Shows foreign vs local net flow, dominant broker (Bandar), top accumulators and distributors.",
+      inputSchema: { type: "object", properties: {
+        symbol: { type: "string", description: "IDX stock symbol e.g. GGRM" },
+        date:   { type: "string", description: "YYYY-MM-DD. Leave empty for latest session." },
+        period: { type: "string", description: "TB_PERIOD_LAST_1_DAY (default), TB_PERIOD_LAST_5_DAY, TB_PERIOD_LAST_30_DAY", default: "TB_PERIOD_LAST_1_DAY" },
+      }, required: ["symbol"] } },
+    { name: "stockbit_delta_summary",
+      description: "Wyckoff delta analysis — open/close session buy-sell split, foreign flow, large lot activity, verdict.",
+      inputSchema: { type: "object", properties: {
+        symbol: { type: "string" }, date: { type: "string", description: "YYYY-MM-DD. Defaults to today." },
+      }, required: ["symbol"] } },
+    { name: "stockbit_broker_flow",
+      description: "Per-broker net positions from running trade samples. Use stockbit_broker_distribution for full-day accuracy.",
+      inputSchema: { type: "object", properties: {
+        symbol: { type: "string" }, date: { type: "string" }, top_n: { type: "number", default: 10 },
+      }, required: ["symbol"] } },
+    { name: "stockbit_running_trade",
+      description: "Raw running trade records. Use stockbit_delta_summary for analysis; this is for deep inspection.",
+      inputSchema: { type: "object", properties: {
+        symbol: { type: "string" }, date: { type: "string" }, sort: { type: "string", enum: ["DESC","ASC"] },
+      }, required: ["symbol"] } },
+  ],
+}));
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+  const symbol = (args.symbol ?? "").toUpperCase();
+  const tradeDate = args.date ?? new Date().toISOString().split("T")[0];
+  try {
+    await sleep(jitter());
+    if (name === "stockbit_broker_distribution") {
+      const period = args.period ?? "TB_PERIOD_LAST_1_DAY";
+      const raw = await fetchBrokerDistribution(symbol, tradeDate, period);
+      if (!raw?.data?.by_value?.top_broker_buy?.length)
+        return { content: [{ type: "text", text: `No broker distribution data for ${symbol} on ${tradeDate}.` }] };
+      return { content: [{ type: "text", text: JSON.stringify(computeBrokerDistributionSummary(raw, symbol, period), null, 2) }] };
+    }
+    if (name === "stockbit_delta_summary") {
+      const oc = await fetchOpenAndClose(symbol, tradeDate);
+      if (!oc.open.length && !oc.close.length)
+        return { content: [{ type: "text", text: `No running trade data for ${symbol} on ${tradeDate}.` }] };
+      return { content: [{ type: "text", text: JSON.stringify(computeDeltaSummary(oc, symbol, tradeDate), null, 2) }] };
+    }
+    if (name === "stockbit_broker_flow") {
+      const oc = await fetchOpenAndClose(symbol, tradeDate);
+      const all = [...oc.open, ...oc.close];
+      if (!all.length) return { content: [{ type: "text", text: `No data for ${symbol} on ${tradeDate}.` }] };
+      return { content: [{ type: "text", text: JSON.stringify(computeBrokerFlow(all, args.top_n ?? 10), null, 2) }] };
+    }
+    if (name === "stockbit_running_trade") {
+      const trades = await fetchRunningTrade(symbol, tradeDate, args.sort ?? "DESC", 100);
+      return { content: [{ type: "text", text: JSON.stringify(trades, null, 2) }] };
+    }
+    return { content: [{ type: "text", text: `Unknown tool: ${name}` }] };
+  } catch (err) {
+    if (err.message === "401_UNAUTHORIZED")
+      return { content: [{ type: "text", text: "401 Unauthorized — Bearer token expired. Update bearer_token in config.json." }] };
+    return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+  }
+});
+
+async function main() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+main().catch(console.error);
+```
+
+### 3e — token-server.js
+
+```js
+#!/usr/bin/env node
+const http = require("http");
+const fs   = require("fs");
+const path = require("path");
+
+const PORT   = 3002;
+const CONFIG = path.join(__dirname, "config.json");
+
+const server = http.createServer((req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+  if (req.method === "GET" && req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true })); return;
+  }
+  if (req.method === "POST" && req.url === "/token") {
+    let body = "";
+    req.on("data", c => body += c);
+    req.on("end", () => {
+      try {
+        const { token } = JSON.parse(body);
+        if (!token) throw new Error("Invalid token");
+        const cfg = fs.existsSync(CONFIG) ? JSON.parse(fs.readFileSync(CONFIG, "utf8")) : {};
+        cfg.bearer_token = token;
+        fs.writeFileSync(CONFIG, JSON.stringify(cfg, null, 2));
+        console.log(`[${new Date().toLocaleTimeString("id-ID")}] Token updated`);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+    }); return;
+  }
+  res.writeHead(404); res.end();
+});
+
+server.listen(PORT, "127.0.0.1", () => {
+  console.log(`Stockbit Token Server running on localhost:${PORT}`);
+});
+```
+
+### 3f — Chrome extension files
+
+**extension/manifest.json**
+```json
+{
+  "manifest_version": 3,
+  "name": "Stockbit Token Sync",
+  "version": "1.0",
+  "description": "Captures Stockbit Bearer token and syncs it to the local MCP server config.",
+  "permissions": ["webRequest", "storage"],
+  "host_permissions": ["https://*.stockbit.com/*", "http://localhost:3002/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html" }
+}
+```
+
+**extension/background.js**
+```js
+// Intercept requests to exodus.stockbit.com and capture the Bearer token
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  (details) => {
+    const authHeader = details.requestHeaders?.find(h => h.name.toLowerCase() === "authorization");
+    if (authHeader?.value?.startsWith("Bearer ")) {
+      const token = authHeader.value.replace("Bearer ", "").trim();
+      chrome.storage.local.set({ token, captured_at: new Date().toISOString(), synced: false });
+    }
+  },
+  { urls: ["https://exodus.stockbit.com/*"] },
+  ["requestHeaders"]
+);
+```
+
+**extension/popup.html** — see source in `stockbit-mcp/extension/popup.html` (dark UI with sync button)
+
+**extension/popup.js** — reads token from storage, POSTs to `localhost:3002/token` on button click
+
+### 3g — Install and test
+
 ```bash
-cd ~/Documents/Erick-claude-workspace/brainstorm-digi-product/stockbit-mcp
+cd <your-project-path>/stockbit-mcp
 npm install
-```
 
-**Test it works:**
-```bash
-node -e "const h=require('https'); h.get('https://exodus.stockbit.com/order-trade/running-trade?symbols[]=BBCA&sort=DESC&limit=1&order_by=RUNNING_TRADE_ORDER_BY_TIME', {headers:{Authorization:'Bearer '+require('./config.json').bearer_token}}, r=>{let d=''; r.on('data',c=>d+=c); r.on('end',()=>console.log(JSON.parse(d).message))}).on('error',e=>console.error(e))"
+# Test token server
+node token-server.js &
+curl -s http://localhost:3002/health   # → {"ok":true}
+kill %1
 ```
-
-Expected: `Successfully loaded running trade data`
-If you get 401: token expired — do Step 6 (token refresh).
 
 **Three tools Claude uses:**
 
@@ -155,7 +537,7 @@ The token server receives the Stockbit Bearer token from the Chrome extension an
 
 **Start it once manually to test:**
 ```bash
-cd ~/Documents/Erick-claude-workspace/brainstorm-digi-product/stockbit-mcp
+cd <your-project-path>/stockbit-mcp
 node token-server.js
 # Should print: Stockbit Token Server running on localhost:3002
 ```
