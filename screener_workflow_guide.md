@@ -495,6 +495,40 @@ The VDA is the **bottom panel** (separate from the price chart). It reads volume
 
 ---
 
+## Analysis Architecture — 3-Tier System
+
+Each stock gets three independent layers of analysis. Tiers are hierarchical — not voting. Chart (Tier 1) is always primary.
+
+```
+IDX Stocks:
+┌───────────────────┬───────────────────┬───────────────────┐
+│  TIER 1: CHART    │  TIER 2: FLOW     │  TIER 3: NEWS     │
+│  TradingView MCP  │  Stockbit MCP     │  Tavily MCP       │
+│  ───────────────  │  ─────────────    │  ─────────────    │
+│  Wyckoff signals  │  Foreign net IDR  │  Earnings/news    │
+│  Ichimoku locks   │  Dominant broker  │  Sector context   │
+│  VDA volume       │  "WHO is buying?" │  "WHY moving?"    │
+│  "Is signal       │                   │                   │
+│   valid?"         │                   │                   │
+└───────────────────┴───────────────────┴───────────────────┘
+ Buy if: BUY SIGNAL + foreign accumulating + no negative news
+
+US Stocks:
+┌───────────────────┬───────────────────┬───────────────────┐
+│  TIER 1: CHART    │  TIER 2: FUNDAMENTAL│ TIER 3: NEWS    │
+│  TradingView MCP  │  Finnhub MCP      │  Tavily MCP       │
+│  ───────────────  │  ─────────────    │  ─────────────    │
+│  Price trend      │  Analyst consensus│  Earnings story   │
+│  Support/resist   │  Earnings date    │  Competitive news │
+│  "Where is price  │  Buy/Hold counts  │  Macro tailwinds  │
+│   technically?"   │  "What do analysts│  "What's the      │
+│                   │   say in numbers?"│   narrative?"     │
+└───────────────────┴───────────────────┴───────────────────┘
+ Hold if: Uptrend + analyst consensus BUY + no structural headwind
+```
+
+---
+
 ## Stockbit MCP — Running Trade & Broker Flow
 
 ### What It Is
@@ -568,6 +602,137 @@ tail -f ~/Library/Logs/stockbit-token-server.log
 
 ---
 
+## NASDAQ Screeners — Finding New US Opportunities
+
+Same two-screener concept as IDX, but different filter values and a different workflow cadence.
+
+### Key Differences vs IDX Screeners
+
+| | IDX | NASDAQ |
+|--|-----|--------|
+| Cadence | Daily morning + evening | Weekly (not daily) |
+| Purpose | Find swing trades | Find new investment ideas |
+| Broker flow | Stockbit available | Not available |
+| Short selling | NOT allowed (retail) | Allowed — but we ignore it (long only) |
+| Liquidity filter | Price × Vol > 5B IDR | Market cap > $1B (use instead) |
+| Pine indicators | Both work | Both work (same scripts) |
+| Timeframe | Daily (D) | Daily (D) for swing, Weekly (W) for investment |
+
+**Critical:** NASDAQ has no Stockbit equivalent for broker flow. Tier 2 (flow confirmation) is missing for US stocks. This means US signals have lower conviction than IDX signals where all 3 tiers align.
+
+---
+
+### Screener 1 — "NASDAQ Accumulation" (TradingView)
+
+Catches US stocks quietly building a base.
+
+| Filter | Value | Why |
+|--------|-------|-----|
+| Exchange | NASDAQ (or add NYSE) | US markets |
+| Type | Stock | Exclude ETFs |
+| Price | > 5 | Remove penny stocks |
+| Avg Volume (30d) | > 1,000,000 | Minimum liquidity |
+| Relative Volume | < 0.6 | Volume drying = accumulation |
+| RSI (14) | between 40–55 | Not in freefall, not extended |
+
+Sort: Relative Volume ascending. Columns: Close, Change%, Volume, Rel Vol, RSI(14), Market Cap.
+
+> **Result count target:** 30–60 stocks. If too many, add Market Cap > 2,000,000,000 (2B) filter.
+
+---
+
+### Screener 2 — "NASDAQ Momentum" (TradingView)
+
+Catches US stocks already breaking out with volume.
+
+| Filter | Value | Why |
+|--------|-------|-----|
+| Exchange | NASDAQ (or add NYSE) | US markets |
+| Type | Stock | Exclude ETFs |
+| Price | > 5 | Remove penny stocks |
+| EMA (89) | less than Close | Medium-term uptrend |
+| RSI (21) | greater than 55 | Momentum — NASDAQ sustains higher RSI than IDX |
+| Relative Volume | greater than 1.5 | Above-average activity (higher threshold than IDX) |
+| Market Cap | greater than 1,000,000,000 | Filter out micro-caps and manipulation |
+
+Sort: Relative Volume descending.
+
+> **Why RSI > 55 not > 54?** NASDAQ stocks have deeper institutional support and can run longer without pulling back vs IDX. The extra 1 point filters out early noise.
+
+> **Why Rel Vol > 1.5 not > 1.0?** US stocks have much higher baseline activity. 1.0x is normal. 1.5x is genuinely elevated.
+
+---
+
+### NASDAQ Workflow (Weekly, not daily)
+
+The US portfolio is investment/hybrid — not pure swing trading. Use the screeners **once a week** to find new ideas, not every morning.
+
+```
+WEEKLY (Sunday evening or Monday morning):
+
+1. finnhub_us_portfolio_check — existing holdings snapshot
+2. NASDAQ Screener 2 → any breakouts this week?
+3. Chart check top 3–5 Screener 2 results: Wyckoff + VDA
+4. If BUY SIGNAL: check Finnhub analyst consensus + Tavily news
+5. NASDAQ Screener 1 → any accumulation bases forming?
+6. Update us_portfolio_journal.md with findings
+```
+
+**No broker flow available** → rely on 2-tier only (chart + Finnhub/news). Reduce position size vs IDX entries where all 3 tiers confirm.
+
+### Entry Rules for NASDAQ (same Wyckoff 2-Lock)
+
+Same entry system as IDX:
+- Lock 1: Price above cloud AND Tenkan > Kijun AND Chikou bullish
+- Lock 2: SoS, Spring, or NS signal
+- Spring exception: allowed below cloud with TK > KJ
+
+**Additional NASDAQ filter before entry:**
+- Finnhub analyst consensus: at least BUY (≥55% bullish)
+- No earnings in next 7 days (avoid holding through reports unless intentional)
+- Market cap > $1B (avoid micro-cap manipulation)
+
+---
+
+## Finnhub MCP — US Stock Fundamentals
+
+Used during US portfolio checks. Permanent API key (no daily refresh). Free tier, 60 calls/min.
+
+### Five Tools
+
+| Tool | When to use |
+|------|-------------|
+| `finnhub_us_portfolio_check(symbols[])` | **Start of every US portfolio review** — pulls price + analyst consensus + next earnings for all holdings in one call |
+| `finnhub_earnings(symbol)` | Check if earnings are nearby before holding through a report |
+| `finnhub_recommendation(symbol)` | Analyst consensus for a single stock |
+| `finnhub_quote(symbol)` | Quick current price check |
+| `finnhub_news(symbol, days)` | Recent headlines for a stock |
+
+### How to Read Analyst Consensus
+
+| Verdict | Meaning |
+|---------|---------|
+| STRONG BUY | ≥70% of analysts bullish |
+| BUY | 55–69% bullish |
+| HOLD | 45–54% bullish |
+| SELL | <45% bullish |
+
+### How Finnhub Integrates with the US Portfolio Workflow
+
+1. `finnhub_us_portfolio_check` → get snapshot of all 11 positions
+2. Flag any stock with earnings in <7 days → evaluate trim/hold risk
+3. Flag any stock where analyst consensus diverges from chart trend → investigate with Tavily
+4. Combine with TradingView price action for the full picture
+
+### Example: AVGO Pre-Earnings
+- Finnhub: earnings June 3, EPS estimate $1.60
+- Finnhub: 28 Buy / 3 Hold = STRONG BUY (90% bullish)
+- TradingView: at 30-bar high, +11% in 30 bars
+- Tavily: no negative pre-announcement news
+- Decision: Strong hold, consider trimming 20% to reduce gap-down risk
+
+---
+
 ## Key Rules to Remember
 
 1. **Never buy below the cloud.** Cloud = the dividing line between bullish and bearish. Exception: Springs can fire below cloud — only need TK > KJ.
@@ -605,4 +770,4 @@ tail -f ~/Library/Logs/stockbit-token-server.log
 | Investment portfolio | `investment_portfolio_journal.md` |
 | US portfolio | `us_portfolio_journal.md` |
 
-*Last updated: 2026-05-31*
+*Last updated: 2026-06-02*

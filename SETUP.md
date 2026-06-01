@@ -7,25 +7,70 @@ Read this first before touching any other file.
 
 ## System Overview
 
-Five components work together:
+All components feed into Claude Code, which runs the analysis:
 
 ```
-TradingView Desktop ──CDP──► TradingView MCP ──► Claude Code
-                                                       │
-Stockbit Web ──token──► Chrome Extension               │
-                              │                        │
-                         Token Server ──config.json──► Stockbit MCP ──►┘
+TradingView Desktop ──CDP──► TradingView MCP ──────────────────────────┐
+                                                                        │
+Stockbit Web ──token──► Chrome Extension                                │
+                              │                                         ▼
+                         Token Server ──config.json──► Stockbit MCP ──► Claude Code
+                                                                        ▲
+finnhub-mcp/config.json ──────────────────────────► Finnhub MCP ───────┤
+                                                                        │
+Tavily API key (in ~/.claude.json) ──────────────► News MCP (Tavily) ──┘
 ```
 
-| Component | What it does | Required? |
-|-----------|-------------|-----------|
-| **Claude Code** | The AI agent that runs the morning/evening analysis | Yes |
-| **TradingView Desktop** | Charting app — Claude controls it via CDP | Yes |
-| **TradingView MCP** | Node.js bridge between Claude and TradingView Desktop | Yes |
-| **Stockbit MCP** | Node.js server that fetches broker flow data from Stockbit API | Yes |
-| **Token Server** | Tiny HTTP server that receives token from Chrome extension | Yes |
-| **Chrome Extension** | Auto-captures Bearer token from Stockbit, syncs to config.json | Recommended |
-| **News MCP (Tavily)** | Web news search via Tavily API | Yes |
+| Component | What it does | Market | Required? |
+|-----------|-------------|--------|-----------|
+| **Claude Code** | The AI agent that runs all analysis | Both | Yes |
+| **TradingView Desktop** | Charting app — Claude controls it via CDP | Both | Yes |
+| **TradingView MCP** | Bridge between Claude and TradingView Desktop | Both | Yes |
+| **Stockbit MCP** | Full-day broker flow (foreign vs local net flow) | IDX only | Yes |
+| **Token Server** | Receives Stockbit token from Chrome extension | IDX only | Yes |
+| **Chrome Extension** | Auto-captures Stockbit Bearer token daily | IDX only | Recommended |
+| **Finnhub MCP** | Earnings calendar + analyst consensus for US stocks | US only | Yes |
+| **News MCP (Tavily)** | Deep qualitative news search | Both | Yes |
+
+---
+
+## Analysis Architecture — 3-Tier System
+
+Different tiers are used for IDX vs US stocks:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    IDX STOCK ANALYSIS                               │
+├──────────────────────┬──────────────────────┬───────────────────────┤
+│   TIER 1: CHART      │  TIER 2: FLOW        │  TIER 3: NEWS        │
+│   TradingView MCP    │  Stockbit MCP        │  Tavily MCP          │
+│   ────────────────   │  ────────────────    │  ────────────────    │
+│   Wyckoff signals    │  Foreign net (IDR)   │  Earnings/news       │
+│   Ichimoku locks     │  Dominant broker     │  Sector context      │
+│   VDA volume         │  Absorption/dist.    │  Macro catalysts     │
+│   "Is the pattern    │  "WHO is behind      │  "WHY is this        │
+│    valid?"           │   the move?"         │   moving?"           │
+├──────────────────────┴──────────────────────┴───────────────────────┤
+│  Decision: Chart signal + Flow confirm + No negative news = ENTER   │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                    US STOCK ANALYSIS                                │
+├──────────────────────┬──────────────────────┬───────────────────────┤
+│   TIER 1: CHART      │  TIER 2: FUNDAMENTAL │  TIER 3: NEWS        │
+│   TradingView MCP    │  Finnhub MCP         │  Tavily MCP          │
+│   ────────────────   │  ────────────────    │  ────────────────    │
+│   Price action       │  Analyst consensus   │  Earnings narrative  │
+│   Trend direction    │  Earnings calendar   │  Sector tailwinds    │
+│   Support/resist     │  Buy/hold/sell count │  Competitive news    │
+│   "Where is price    │  "What do analysts   │  "What's the story   │
+│    technically?"     │   say numerically?"  │   behind the move?"  │
+├──────────────────────┴──────────────────────┴───────────────────────┤
+│  Decision: Chart trend + Analyst consensus + Catalyst = HOLD/ENTER  │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Key principle:** Tiers are hierarchical, not voting. Chart (Tier 1) is always primary — price is truth. Tier 2 confirms conviction. Tier 3 explains context. They don't vote against each other; they add layers of confidence.
 
 ---
 
@@ -43,21 +88,17 @@ Stockbit Web ──token──► Chrome Extension               │
 
 ## Step 1 — Clone / Copy the Project
 
-```bash
-git clone https://github.com/REPO_URL/idx-trading-system.git
-cd idx-trading-system
+The project lives in two folders:
+
+```
+~/Documents/Erick-claude-workspace/brainstorm-digi-product/
+├── TV-Stock-Analysis/        ← Pine scripts, journals, workflow guides (this folder)
+└── stockbit-mcp/             ← Stockbit MCP server + Chrome extension
 ```
 
-The repo contains two folders:
+Also needed separately:
 ```
-idx-trading-system/
-├── (root)          ← Pine scripts, workflow guides, CLAUDE.md (this folder)
-└── stockbit-mcp/  ← Stockbit MCP server + Chrome extension
-```
-
-Also needed separately (see Step 2):
-```
-~/tradingview-mcp/  ← TradingView MCP server
+~/tradingview-mcp/            ← TradingView MCP server (separate repo)
 ```
 
 ---
@@ -86,7 +127,7 @@ node src/server.js --help
 ## Step 3 — Stockbit MCP
 
 ```bash
-cd idx-trading-system/stockbit-mcp
+cd ~/Documents/Erick-claude-workspace/brainstorm-digi-product/stockbit-mcp
 npm install
 ```
 
@@ -114,47 +155,15 @@ The token server receives the Stockbit Bearer token from the Chrome extension an
 
 **Start it once manually to test:**
 ```bash
-cd idx-trading-system/stockbit-mcp
+cd ~/Documents/Erick-claude-workspace/brainstorm-digi-product/stockbit-mcp
 node token-server.js
 # Should print: Stockbit Token Server running on localhost:3002
 ```
 
 **Install as a macOS launchd service (auto-starts on login, auto-restarts on crash):**
-
-Create `~/Library/LaunchAgents/com.USERNAME.stockbit-token-server.plist` — replace `USERNAME`, `YOUR_NODE_PATH`, and `YOUR_PROJECT_PATH`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.USERNAME.stockbit-token-server</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>YOUR_NODE_PATH</string>
-        <string>YOUR_PROJECT_PATH/stockbit-mcp/token-server.js</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>YOUR_PROJECT_PATH/stockbit-mcp</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/Users/USERNAME/Library/Logs/stockbit-token-server.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/USERNAME/Library/Logs/stockbit-token-server.log</string>
-</dict>
-</plist>
-```
-
-Find your node path with: `which node`
-Find your project path with: `pwd` inside the stockbit-mcp folder
-
 ```bash
-# Load the service
-launchctl load ~/Library/LaunchAgents/com.USERNAME.stockbit-token-server.plist
+# Copy the plist (already created, just load it)
+launchctl load ~/Library/LaunchAgents/com.erick.stockbit-token-server.plist
 
 # Verify running
 curl -s http://localhost:3002/health   # → {"ok":true}
@@ -165,9 +174,15 @@ tail -f ~/Library/Logs/stockbit-token-server.log
 
 **Manage the service:**
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.USERNAME.stockbit-token-server.plist  # Stop
-launchctl load   ~/Library/LaunchAgents/com.USERNAME.stockbit-token-server.plist  # Start
+launchctl unload ~/Library/LaunchAgents/com.erick.stockbit-token-server.plist  # Stop
+launchctl load   ~/Library/LaunchAgents/com.erick.stockbit-token-server.plist  # Start
 ```
+
+**The plist file** (`~/Library/LaunchAgents/com.erick.stockbit-token-server.plist`) points to:
+- Node: `/opt/homebrew/bin/node`
+- Script: full path to `token-server.js`
+
+If node is at a different path on the new machine, update the plist `<string>` for the node binary.
 
 ---
 
@@ -215,7 +230,46 @@ The Stockbit Bearer token expires every 24 hours.
 
 ---
 
-## Step 7 — News MCP (Tavily)
+## Step 7 — Finnhub MCP (US stocks only)
+
+Provides earnings calendar + analyst consensus for US portfolio analysis. Free tier, permanent API key (no daily refresh).
+
+```bash
+cd finnhub-mcp
+npm install
+cp config.example.json config.json
+# Edit config.json and paste your API key
+```
+
+**Get a free API key:** https://finnhub.io/register (no credit card, permanent key)
+
+**Test it works:**
+```bash
+node -e "
+const https = require('https');
+const key = require('./config.json').api_key;
+https.get('https://finnhub.io/api/v1/quote?symbol=AAPL&token=' + key, r => {
+  let d=''; r.on('data',c=>d+=c);
+  r.on('end',()=>console.log('AAPL:', JSON.parse(d).c, '— OK'));
+});
+"
+```
+
+**5 tools available:**
+
+| Tool | What it returns |
+|------|----------------|
+| `finnhub_us_portfolio_check` | **All holdings at once** — price + analyst consensus + next earnings date |
+| `finnhub_earnings` | Next earnings date, EPS estimate for any US stock |
+| `finnhub_recommendation` | Analyst buy/hold/sell counts + consensus verdict |
+| `finnhub_quote` | Current price, change%, high/low |
+| `finnhub_news` | Last N days of headlines |
+
+**Usage:** call `finnhub_us_portfolio_check(["AAPL","NVDA","MSFT"...])` at the start of any US portfolio review — one call covers all 11 stocks.
+
+---
+
+## Step 8 — News MCP (Tavily)
 
 Used by Claude to search news for each ticker during morning/evening scans.
 
@@ -227,7 +281,7 @@ The API key is stored in `~/.claude.json` under `mcpServers.news-search.env.TAVI
 
 ---
 
-## Step 8 — Register All MCPs in Claude Code
+## Step 9 — Register All MCPs in Claude Code
 
 Claude Code reads MCP server configs from `~/.claude.json`. On a new machine, add all three servers:
 
@@ -259,12 +313,17 @@ Add under `"mcpServers"`:
       "command": "node",
       "args": ["/YOUR_PROJECT_PATH/stockbit-mcp/index.js"],
       "env": {}
+    },
+    "finnhub": {
+      "command": "node",
+      "args": ["/YOUR_PROJECT_PATH/finnhub-mcp/index.js"],
+      "env": {}
     }
   }
 }
 ```
 
-Replace `YOUR_USER` and paths with actual values on the new machine.
+Replace `YOUR_PROJECT_PATH` with the actual path on the new machine.
 
 ---
 
@@ -285,7 +344,7 @@ These must be configured manually inside TradingView Desktop:
 
 Sort: Relative Volume ascending. Columns: Close, Change%, Volume, Rel Vol, RSI(14).
 
-**Screener 2 — "IDX Momentum"** (Stock Screener → save as this name, or rename to your preference)
+**Screener 2 — "Erick Volum + Trend"** (Stock Screener → save as this name)
 
 | Filter | Value |
 |--------|-------|
@@ -323,18 +382,21 @@ If the project is moved, update the absolute path inside the hook command.
 
 | File | Purpose |
 |------|---------|
-| `CLAUDE.md` | Claude's instructions — fill in your trading profile, workflow triggers, MCP quirks |
-| `SETUP.md` | This file — full setup guide for new machine |
-| `screener_workflow_guide.md` | Daily workflow, signal legend, entry rules |
-| `trading_journal.md` | **Create your own** — SC Watch table + trade log (not included in repo, personal data) |
-| `wyckoff_ichimoku_idx_analyzer.pine` | Main chart indicator source |
-| `volume_distribution_analyzer.pine` | VDA bottom panel indicator source |
-| `stockbit-mcp/index.js` | Stockbit MCP server (3 tools) |
+| `TV-Stock-Analysis/CLAUDE.md` | Claude's instructions — trading profile, workflow triggers, MCP quirks |
+| `TV-Stock-Analysis/SETUP.md` | This file — full setup guide for new machine |
+| `TV-Stock-Analysis/screener_workflow_guide.md` | Daily workflow, signal legend, entry rules |
+| `TV-Stock-Analysis/trading_journal.md` | SC Watch + trading account journal |
+| `TV-Stock-Analysis/investment_portfolio_journal.md` | Long-term IDX portfolio journal |
+| `TV-Stock-Analysis/us_portfolio_journal.md` | US stocks portfolio journal |
+| `TV-Stock-Analysis/wyckoff_ichimoku_idx_analyzer.pine` | Main chart indicator source |
+| `TV-Stock-Analysis/volume_distribution_analyzer.pine` | VDA bottom panel indicator source |
+| `stockbit-mcp/index.js` | Stockbit MCP — 3 tools (IDX broker flow) |
 | `stockbit-mcp/token-server.js` | Token receiver from Chrome extension |
-| `stockbit-mcp/config.json` | Bearer token — **create from config.example.json, never commit** |
-| `stockbit-mcp/config.example.json` | Template for config.json |
+| `stockbit-mcp/config.json` | Stockbit Bearer token — **never commit** |
 | `stockbit-mcp/extension/` | Chrome extension source |
-| `~/Library/LaunchAgents/com.USERNAME.stockbit-token-server.plist` | macOS auto-start — create manually (see Step 4) |
+| `finnhub-mcp/index.js` | Finnhub MCP — 5 tools (US earnings + analyst consensus) |
+| `finnhub-mcp/config.json` | Finnhub API key — **never commit** |
+| `~/Library/LaunchAgents/com.USERNAME.stockbit-token-server.plist` | macOS auto-start config |
 
 ---
 
