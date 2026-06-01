@@ -628,8 +628,8 @@ Catches US stocks quietly building a base.
 
 | Filter | Value | Why |
 |--------|-------|-----|
-| Exchange | NASDAQ (or add NYSE) | US markets |
-| Type | Stock | Exclude ETFs |
+| Exchange | NASDAQ | US markets |
+| Type | Stock | Exclude ETFs, funds |
 | Price | > 5 | Remove penny stocks |
 | Avg Volume (30d) | > 1,000,000 | Minimum liquidity |
 | Relative Volume | < 0.6 | Volume drying = accumulation |
@@ -637,7 +637,7 @@ Catches US stocks quietly building a base.
 
 Sort: Relative Volume ascending. Columns: Close, Change%, Volume, Rel Vol, RSI(14), Market Cap.
 
-> **Result count target:** 30–60 stocks. If too many, add Market Cap > 2,000,000,000 (2B) filter.
+**Result count: ~22 stocks (confirmed June 2026)**
 
 ---
 
@@ -647,19 +647,21 @@ Catches US stocks already breaking out with volume.
 
 | Filter | Value | Why |
 |--------|-------|-----|
-| Exchange | NASDAQ (or add NYSE) | US markets |
-| Type | Stock | Exclude ETFs |
+| Exchange | NASDAQ | US markets |
+| Type | Stock | Exclude ETFs, funds |
 | Price | > 5 | Remove penny stocks |
-| EMA (89) | less than Close | Medium-term uptrend |
-| RSI (21) | greater than 55 | Momentum — NASDAQ sustains higher RSI than IDX |
-| Relative Volume | greater than 1.5 | Above-average activity (higher threshold than IDX) |
-| Market Cap | greater than 1,000,000,000 | Filter out micro-caps and manipulation |
+| EMA (50) | less than Close | Price above 50-day avg = uptrend. Note: EMA(89) not available on TradingView NASDAQ screener |
+| RSI (21) | > 55 | NASDAQ sustains higher RSI than IDX before stalling |
+| Relative Volume | > 1.5 | 1.0x is normal for US stocks, 1.5x is genuinely elevated |
+| Market Cap | 1,000,000,000 – 200,000,000,000 | $1B–$200B mid-cap focus. Filters out mega-caps (AAPL/MSFT/GOOG) and micro-caps |
 
 Sort: Relative Volume descending.
 
-> **Why RSI > 55 not > 54?** NASDAQ stocks have deeper institutional support and can run longer without pulling back vs IDX. The extra 1 point filters out early noise.
+**Result count: ~25 stocks (confirmed June 2026)**
 
-> **Why Rel Vol > 1.5 not > 1.0?** US stocks have much higher baseline activity. 1.0x is normal. 1.5x is genuinely elevated.
+> **Why $1B–$200B Market Cap?** Without the upper limit, mega-caps dominate results — they're always above EMA50 + RSI>55. The $200B cap keeps focus on mid-caps where new opportunities emerge. Your existing holdings will still appear on exceptional volume days, which is useful.
+
+> **Why EMA(50) not EMA(89)?** TradingView NASDAQ screener doesn't support 89 as a custom EMA period. EMA(50) is the closest available preset and works as a solid medium-term trend filter.
 
 ---
 
