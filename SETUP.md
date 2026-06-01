@@ -88,20 +88,18 @@ Different tiers are used for IDX vs US stocks:
 
 ## Step 1 — Clone / Copy the Project
 
-The project lives in two folders (place them wherever you like — just keep them siblings):
+Clone this repo, then create `stockbit-mcp/` as a sibling folder:
 
 ```
 <your-project-path>/
-├── TV-Stock-Analysis/        ← Pine scripts, journals, workflow guides (this folder)
-└── stockbit-mcp/             ← Stockbit MCP server + Chrome extension
+├── idx-trading-system/   ← this repo (Pine scripts, journals, CLAUDE.md, SETUP.md)
+│   └── stockbit-mcp/     ← Stockbit MCP lives inside the repo
+└── tradingview-mcp/      ← TradingView MCP (separate repo, see Step 2)
 ```
 
-Also needed separately:
-```
-~/tradingview-mcp/            ← TradingView MCP server (separate repo)
-```
+> `stockbit-mcp/` is already included inside this repo — no separate clone needed.
 
-Update all absolute paths in `~/.claude.json` and the launchd plist to match your chosen location.
+Update all absolute paths in `~/.claude.json` and the launchd plist to match where you cloned the repo.
 
 ---
 
@@ -512,7 +510,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 ### 3g — Install and test
 
 ```bash
-cd <your-project-path>/stockbit-mcp
+cd <repo-root>/stockbit-mcp
 npm install
 
 # Test token server
@@ -537,7 +535,7 @@ The token server receives the Stockbit Bearer token from the Chrome extension an
 
 **Start it once manually to test:**
 ```bash
-cd <your-project-path>/stockbit-mcp
+cd <repo-root>/stockbit-mcp
 node token-server.js
 # Should print: Stockbit Token Server running on localhost:3002
 ```
@@ -754,7 +752,7 @@ Both must be **visible on the chart** for `data_get_pine_tables` to read their d
 ## Step 10 — Project Hook (auto-start token server)
 
 A Claude Code hook checks that the token server is running on every prompt. Located at:
-`TV-Stock-Analysis/.claude/settings.json`
+`.claude/settings.json` (in the repo root)
 
 If the project is moved, update the absolute path inside the hook command.
 
@@ -764,14 +762,14 @@ If the project is moved, update the absolute path inside the hook command.
 
 | File | Purpose |
 |------|---------|
-| `TV-Stock-Analysis/CLAUDE.md` | Claude's instructions — trading profile, workflow triggers, MCP quirks |
-| `TV-Stock-Analysis/SETUP.md` | This file — full setup guide for new machine |
-| `TV-Stock-Analysis/screener_workflow_guide.md` | Daily workflow, signal legend, entry rules |
-| `TV-Stock-Analysis/trading_journal.md` | SC Watch + trading account journal |
-| `TV-Stock-Analysis/investment_portfolio_journal.md` | Long-term IDX portfolio journal |
-| `TV-Stock-Analysis/us_portfolio_journal.md` | US stocks portfolio journal |
-| `TV-Stock-Analysis/wyckoff_ichimoku_idx_analyzer.pine` | Main chart indicator source |
-| `TV-Stock-Analysis/volume_distribution_analyzer.pine` | VDA bottom panel indicator source |
+| `CLAUDE.md` | Claude's instructions — trading profile, workflow triggers, MCP quirks |
+| `SETUP.md` | This file — full setup guide for new machine |
+| `screener_workflow_guide.md` | Daily workflow, signal legend, entry rules |
+| `trading_journal.md` | SC Watch + trading account journal |
+| `investment_portfolio_journal.md` | Long-term IDX portfolio journal |
+| `us_portfolio_journal.md` | US stocks portfolio journal |
+| `wyckoff_ichimoku_idx_analyzer.pine` | Main chart indicator source |
+| `volume_distribution_analyzer.pine` | VDA bottom panel indicator source |
 | `stockbit-mcp/index.js` | Stockbit MCP — 3 tools (IDX broker flow) |
 | `stockbit-mcp/token-server.js` | Token receiver from Chrome extension |
 | `stockbit-mcp/config.json` | Stockbit Bearer token — **never commit** |
