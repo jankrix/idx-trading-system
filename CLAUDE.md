@@ -39,7 +39,10 @@ if (btn) btn.click();
 | File | Purpose |
 |------|---------|
 | `wyckoff_ichimoku_idx_analyzer.pine` | Chart overlay indicator. Save in TradingView as **"Wyckoff_ichimoku analyzer 1"** |
+| `wyckoff_ichimoku_break21_analyzer.pine` | Combined Wyckoff + Ichimoku + Break 21 overlay. Save as **"Wyckoff + Ichimoku + Break 21 Analyzer"** |
 | `volume_distribution_analyzer.pine` | VDA bottom panel. Save in TradingView as **"Volume Distribution Analysis"** |
+| `bandar_dashboard.py` | **Bandar Intelligence Dashboard** — batch screener + quality gate + broker flow → HTML output |
+| `scalp_server.py` | **Scalp Monitor** — live tape reader. Run: `python3 scalp_server.py` → http://localhost:8765/ |
 | `screener_workflow_guide.md` | Full daily workflow — read this |
 | `SETUP.md` | Setup guide for new machine |
 | `CLAUDE.md` | This file |
@@ -55,7 +58,7 @@ if (btn) btn.click();
 - RSI (14) between 38–52
 - Sort: Rel Vol ascending
 
-### Screener 2: "IDX Momentum" (rename to whatever you prefer)
+### Screener 2: "Erick Volum + Trend" (rename to your own name)
 - Exchange: IDX, Type: Stock, Price > 100
 - EMA(89) < Close, RSI(21) > 54
 - Rel Vol > 1.0, Price × Vol > 5,000,000,000
@@ -111,8 +114,59 @@ Stored in `trading_journal.md` — SC Watch table at top. Not a TradingView watc
 
 ---
 
+## Bandar Intelligence Dashboard
+
+Standalone Python script that runs the full IDX screening pipeline automatically.
+
+**Run:** `python3 bandar_dashboard.py` → opens `bandar_dashboard.html` in browser
+**Token:** reads from `stockbit-mcp/config.json` — refresh via Token Sync extension before running
+
+**What it does:**
+1. Pulls Stockbit bandar screener + foreign flow screener
+2. Scores each candidate using the Conviction Scoring System (auto-computable max 5/9)
+3. Quality gates stocks scoring ≥2 (Piotroski ≥7, Altman >2, net margin >0)
+4. Pulls broker distribution (today + 3-month trend) for stocks passing quality gate
+5. Generates HTML dashboard sorted by score
+
+**Score interpretation:** ≥5 → SC Watch candidate · 3–4 → Monitor · <3 → Pass
+**Wyckoff/Ichimoku (+4) is NOT auto-computed** — still requires manual chart check.
+
+---
+
+## Scalp Monitor
+
+Live tape reader for intraday analysis. Rule-based signals only — no AI in the hot path.
+
+**Run:** `python3 scalp_server.py` → open `http://localhost:8765/`
+**Token:** same `stockbit-mcp/config.json` — no separate setup needed
+
+Enter a symbol and click Watch. Tape polls every 3 seconds.
+
+**Signals:**
+
+| Signal | Condition |
+|--------|-----------|
+| BULLISH TAPE | >70% buy in last 20 trades |
+| BEARISH TAPE | <30% buy in last 20 trades |
+| ABSORPTION | ≥1000 sell lots in last 5 trades but price flat/up |
+| BANDAR LOT | Single trade ≥2000 lots in last 10 |
+| MOMENTUM UP/DOWN | 6 consecutive higher/lower prices |
+
+Tape color: yellow = large lot (≥500), orange border = bandar lot (≥2000).
+
+---
+
 ## Stockbit MCP
-Three tools for broker flow analysis:
+Eight tools:
+
+*Screeners:*
+- `stockbit_screener_bandar(filter, page)` — Bandarmology screener. Verdicts: ACCELERATING / ACCUMULATING / WATCH / DISTRIBUTING
+- `stockbit_screener_foreign_flow(period, page)` — Net foreign flow screener
+- `stockbit_screener_fundamental(type, page)` — Fundamental ranking screener
+
+*Per-stock:*
+- `stockbit_fundamentals(symbol)` — quality gate: Piotroski, Altman Z, margins, momentum
+- `stockbit_insider(symbol)` — major shareholder changes from KSEI
 - `stockbit_broker_distribution(symbol, date)` — full-day foreign/local net flow. Primary tool.
 - `stockbit_delta_summary(symbol, date)` — open vs close session delta
 - `stockbit_running_trade(symbol, date)` — raw ticks

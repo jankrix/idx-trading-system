@@ -769,8 +769,11 @@ If the project is moved, update the absolute path inside the hook command.
 | `investment_portfolio_journal.md` | Long-term IDX portfolio journal |
 | `us_portfolio_journal.md` | US stocks portfolio journal |
 | `wyckoff_ichimoku_idx_analyzer.pine` | Main chart indicator source |
+| `wyckoff_ichimoku_break21_analyzer.pine` | Combined Wyckoff + Ichimoku + Break 21 indicator source |
 | `volume_distribution_analyzer.pine` | VDA bottom panel indicator source |
-| `stockbit-mcp/index.js` | Stockbit MCP — 3 tools (IDX broker flow) |
+| `bandar_dashboard.py` | Bandar Intelligence Dashboard — batch screener → HTML output |
+| `scalp_server.py` | Scalp Monitor — live tape reader at http://localhost:8765/ |
+| `stockbit-mcp/index.js` | Stockbit MCP — 8 tools (IDX screeners + broker flow + fundamentals) |
 | `stockbit-mcp/token-server.js` | Token receiver from Chrome extension |
 | `stockbit-mcp/config.json` | Stockbit Bearer token — **never commit** |
 | `stockbit-mcp/extension/` | Chrome extension source |
@@ -857,3 +860,10 @@ curl -s http://localhost:3002/health   # → {"ok":true}
 ```
 
 All 7 green = system ready.
+
+```bash
+# 8. Scalp Monitor working? (optional — only needed for intraday tape reading)
+python3 scalp_server.py &
+curl -s http://localhost:8765/ | grep -c "Scalp Monitor"   # → 1
+kill %1
+```

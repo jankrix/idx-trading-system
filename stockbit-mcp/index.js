@@ -93,6 +93,94 @@ async function fetchOpenAndClose(symbol, tradeDate) {
   return { open, close };
 }
 
+async function fetchKeystats(symbol) {
+  const url = `https://${BASE_HOST}/keystats/ratio/v1/${symbol.toUpperCase()}?year_limit=10`;
+  return httpsGet(url);
+}
+
+async function fetchInsider(symbol, page = 1, limit = 20) {
+  const params = new URLSearchParams({
+    symbols: symbol.toUpperCase(),
+    page,
+    limit,
+    action_type: "ACTION_TYPE_UNSPECIFIED",
+    source_type: "SOURCE_TYPE_UNSPECIFIED",
+  });
+  const url = `https://${BASE_HOST}/insider/company/majorholder?${params}`;
+  return httpsGet(url);
+}
+
+function parseKeystats(data) {
+  const groups = data?.data?.closure_fin_items_results ?? [];
+  const flat = {};
+  for (const g of groups) {
+    for (const e of g.fin_name_results ?? []) {
+      const { name, value } = e.fitem ?? {};
+      if (name && value) flat[name] = value;
+    }
+  }
+  // Pick the most useful fields for a swing trading fundamental check
+  const pick = (keys) => Object.fromEntries(keys.filter(k => flat[k]).map(k => [k, flat[k]]));
+  return {
+    valuation: pick(["Current PE Ratio (TTM)", "Current Price to Book Value", "Current Price to Sales (TTM)", "EV to EBITDA (TTM)", "Earnings Yield (TTM)", "IHSG PE Ratio TTM (Median)"]),
+    profitability: pick(["Gross Profit Margin (Quarter)", "Operating Profit Margin (Quarter)", "Net Profit Margin (Quarter)", "Return on Equity (TTM)", "Return on Assets (TTM)"]),
+    growth: pick(["Revenue (Quarter YoY Growth)", "Net Income (Quarter YoY Growth)", "Gross Profit (Quarter YoY Growth)"]),
+    financial_health: pick(["Current Ratio (Quarter)", "Debt to Equity Ratio (Quarter)", "Piotroski F-Score", "Altman Z-Score (Modified)", "Interest Coverage (TTM)"]),
+    size: pick(["Revenue (TTM)", "Net Income (TTM)", "EBITDA (TTM)", "Free cash flow (TTM)", "Common Equity", "Total Debt (Quarter)"]),
+    momentum: pick(["Relative Strength Rating", "1 Month Price Returns", "3 Month Price Returns", "6 Month Price Returns", "1 Year Price Returns", "52 Week High", "52 Week Low", "Year to Date Price Returns"]),
+  };
+}
+
+async function fetchScreenerTemplate(templateId, page = 1, limit = 25) {
+  const params = new URLSearchParams({ type: "TEMPLATE_TYPE_GURU", page, limit });
+  const url = `https://${BASE_HOST}/screener/templates/${templateId}?${params}`;
+  return httpsGet(url);
+}
+
+function parseScreenerResults(data) {
+  const calcs = data?.data?.calcs ?? [];
+  return calcs.map(c => ({
+    symbol: c.company.symbol,
+    name: c.company.name,
+    metrics: Object.fromEntries(
+      (c.results ?? []).map(r => [r.item, { display: r.display, raw: parseFloat(r.raw) || 0 }])
+    ),
+  }));
+}
+
+function analyzeBandarMomentum(metrics) {
+  const current  = metrics["Bandar Value"]?.raw ?? 0;
+  const prev     = metrics["Previous Bandar Value"]?.raw ?? 0;
+  const ma10     = metrics["Bandar Value MA 10"]?.raw ?? 0;
+  const ma20     = metrics["Bandar Value MA 20"]?.raw ?? 0;
+
+  const adding      = current > prev;                 // added today vs yesterday
+  const aboveMa10   = current > ma10;                 // above short-term avg
+  const aboveMa20   = current > ma20;                 // above long-term avg
+  const spread      = current - ma20;                 // distance from MA20 — positive = leading upward
+  const acceleration = current - prev;                // how much they added/removed today
+
+  let verdict;
+  if (adding && aboveMa10 && aboveMa20)      verdict = "ACCELERATING";   // all three bullish
+  else if (adding && aboveMa20)              verdict = "ACCUMULATING";   // adding, above long avg
+  else if (!adding && !aboveMa10 && !aboveMa20) verdict = "DISTRIBUTING"; // all three bearish
+  else                                       verdict = "WATCH";           // mixed signals
+
+  return {
+    bandar_value:    metrics["Bandar Value"]?.display ?? "N/A",
+    prev_value:      metrics["Previous Bandar Value"]?.display ?? "N/A",
+    ma10:            metrics["Bandar Value MA 10"]?.display ?? "N/A",
+    ma20:            metrics["Bandar Value MA 20"]?.display ?? "N/A",
+    value_ma20:      metrics["Value MA 20"]?.display ?? "N/A",  // total market turnover
+    adding_today:    adding,
+    above_ma10:      aboveMa10,
+    above_ma20:      aboveMa20,
+    spread_raw:      spread,
+    acceleration_raw: acceleration,
+    verdict,
+  };
+}
+
 // ─── ANALYSIS ────────────────────────────────────────────────────────────────
 
 function parseLot(str) {
@@ -346,6 +434,81 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["symbol"],
       },
     },
+    {
+      name: "stockbit_fundamentals",
+      description: "Per-stock fundamental quality check for an IDX stock using Stockbit keystats. Returns valuation (P/E, P/B, EV/EBITDA), profitability (margins, ROE), growth (revenue/income QoQ YoY), financial health (current ratio, D/E, Piotroski F-Score, Altman Z-Score), size (revenue, net income, FCF), and price momentum (RS rating, returns). Use BEFORE committing to a trade — filters out gorengan and fundamentally broken companies.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          symbol: { type: "string", description: "IDX stock symbol e.g. BBCA, GGRM" },
+        },
+        required: ["symbol"],
+      },
+    },
+    {
+      name: "stockbit_insider",
+      description: "Major shareholder (insider) activity for an IDX stock from KSEI. Shows who owns what % and recent buy/sell changes. Use to detect institutional accumulation or distribution at the ownership level (not just daily flow).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          symbol: { type: "string", description: "IDX stock symbol e.g. BBCA" },
+          page:   { type: "number", description: "Page number, 20 per page. Default: 1.", default: 1 },
+        },
+        required: ["symbol"],
+      },
+    },
+    {
+      name: "stockbit_screener_bandar",
+      description: "Stockbit Bandarmology screener — returns IDX stocks with active Bandar (smart money) accumulation. Verdict logic: ACCELERATING = adding today + above MA10 + above MA20 (strongest); ACCUMULATING = adding today + above MA20; WATCH = mixed signals (check chart — high Bandar Value + low price = silent accumulation); DISTRIBUTING = reducing + below MA10 + below MA20. Use page param for pagination (25 per page).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          filter: {
+            type: "string",
+            enum: ["accelerating", "accumulating", "watch", "distributing", "all"],
+            description: "Filter by verdict. Default: all positive (accelerating + accumulating + watch)",
+            default: "all",
+          },
+          page: {
+            type: "number",
+            description: "Page number for pagination, 25 results per page. Default: 1.",
+            default: 1,
+          },
+        },
+      },
+    },
+    {
+      name: "stockbit_screener_foreign_flow",
+      description: "Stockbit Foreign Flow screener — returns IDX stocks with strongest net foreign buying over a given period. Use to confirm Bandar = foreign institutional accumulation.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          period: {
+            type: "string",
+            enum: ["short", "1m", "3m", "6m"],
+            description: "short = top 10 recent net foreign buy, 1m/3m/6m = 1/3/6 month net foreign flow. Default: 1m",
+            default: "1m",
+          },
+          page: { type: "number", description: "Page number, 25 per page. Default: 1.", default: 1 },
+        },
+      },
+    },
+    {
+      name: "stockbit_screener_fundamental",
+      description: "Stockbit fundamental quality screener — returns IDX stocks ranked by a fundamental metric. Use to build a quality universe before applying Wyckoff entry signals.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          type: {
+            type: "string",
+            enum: ["income_growth", "revenue_growth", "eps_growth", "margins"],
+            description: "income_growth = net income YoY growth, revenue_growth = revenue YoY growth, eps_growth = EPS 3Y CAGR, margins = gross/operating margin. Default: income_growth",
+            default: "income_growth",
+          },
+          page: { type: "number", description: "Page number, 25 per page. Default: 1.", default: 1 },
+        },
+      },
+    },
   ],
 }));
 
@@ -388,6 +551,79 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const sort = args.sort ?? "DESC";
       const trades = await fetchRunningTrade(symbol, tradeDate, sort, 100);
       return { content: [{ type: "text", text: JSON.stringify(trades, null, 2) }] };
+    }
+
+    if (name === "stockbit_fundamentals") {
+      const raw = await fetchKeystats(symbol);
+      const parsed = parseKeystats(raw);
+      return { content: [{ type: "text", text: JSON.stringify({ symbol, ...parsed }, null, 2) }] };
+    }
+
+    if (name === "stockbit_insider") {
+      const page = args.page ?? 1;
+      const raw  = await fetchInsider(symbol, page);
+      const movements = (raw?.data?.movement ?? []).map(m => ({
+        name:        m.name,
+        date:        m.date,
+        nationality: m.nationality === "NATIONALITY_TYPE_FOREIGN" ? "Foreign" : "Local",
+        action:      m.action_type === "ACTION_TYPE_BUY" ? "BUY" : "SELL",
+        prev_pct:    m.previous?.percentage,
+        curr_pct:    m.current?.percentage,
+        change:      m.changes?.value,
+        source:      m.data_source?.label,
+      }));
+      return { content: [{ type: "text", text: JSON.stringify({ symbol, page, is_more: raw?.data?.is_more, movements }, null, 2) }] };
+    }
+
+    if (name === "stockbit_screener_bandar") {
+      const filter = args.filter ?? "all";
+      const page   = args.page ?? 1;
+      const raw    = await fetchScreenerTemplate(96, page);
+      const stocks = parseScreenerResults(raw);
+      const result = stocks
+        .map(s => ({ symbol: s.symbol, name: s.name, ...analyzeBandarMomentum(s.metrics) }))
+        .filter(s => {
+          if (filter === "all") return true;
+          return s.verdict === filter.toUpperCase();
+        })
+        .sort((a, b) => b.spread_raw - a.spread_raw);
+      return { content: [{ type: "text", text: JSON.stringify({ page, count: result.length, filter, stocks: result }, null, 2) }] };
+    }
+
+    if (name === "stockbit_screener_foreign_flow") {
+      const periodMap = { short: 77, "1m": 80, "3m": 81, "6m": 82 };
+      const period = args.period ?? "1m";
+      const page   = args.page ?? 1;
+      const templateId = periodMap[period] ?? 80;
+      const raw = await fetchScreenerTemplate(templateId, page);
+      const stocks = parseScreenerResults(raw);
+      const metricKey = Object.keys(stocks[0]?.metrics ?? {})[0] ?? "Net Foreign Buy / Sell";
+      const result = stocks
+        .map(s => ({
+          symbol: s.symbol,
+          name: s.name,
+          net_foreign: s.metrics[metricKey]?.display ?? "N/A",
+          net_foreign_raw: s.metrics[metricKey]?.raw ?? 0,
+        }))
+        .sort((a, b) => b.net_foreign_raw - a.net_foreign_raw);
+      return { content: [{ type: "text", text: JSON.stringify({ page, count: result.length, period, metric: metricKey, stocks: result }, null, 2) }] };
+    }
+
+    if (name === "stockbit_screener_fundamental") {
+      const typeMap = { income_growth: 111, revenue_growth: 113, eps_growth: 114, margins: 105 };
+      const type = args.type ?? "income_growth";
+      const page = args.page ?? 1;
+      const templateId = typeMap[type] ?? 111;
+      const raw = await fetchScreenerTemplate(templateId, page);
+      const stocks = parseScreenerResults(raw);
+      const result = stocks.map(s => ({
+        symbol: s.symbol,
+        name: s.name,
+        metrics: Object.fromEntries(
+          Object.entries(s.metrics).map(([k, v]) => [k, v.display])
+        ),
+      }));
+      return { content: [{ type: "text", text: JSON.stringify({ page, count: result.length, type, stocks: result }, null, 2) }] };
     }
 
     return { content: [{ type: "text", text: `Unknown tool: ${name}` }] };
